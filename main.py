@@ -13,7 +13,7 @@ from database import get_db, Project
 
 # --- НАСТРОЙКИ ---
 app = FastAPI(title="Программа ЭКО")
-templates = Jinja2Templates(directory="templates", auto_reload=False)
+templates = Jinja2Templates(directory="templates")
 
 # --- ЗАГРУЗКА БАЗЫ ДАННЫХ ---
 df = pd.read_csv("database.csv")
