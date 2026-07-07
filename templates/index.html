@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"> <!-- ВАЖНО: Если этого мета-тега нет, добавьте его -->
+    <title>Программа ЭКО</title>
+    <link rel="stylesheet" href="/static/css/index.css">
+    <link href="https://cdn.jsdelivr.net/npm/tom-select@2.3.1/dist/css/tom-select.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/tom-select@2.3.1/dist/js/tom-select.complete.min.js"></script>
+    <script>const wallDB = {{ wall_json | safe }}; const armDB = {{ arm_json | safe }};</script>
+    <script>
+        const calcResults = {{ calc | tojson | safe if calc else '{}' }}; 
+    </script>
+    <style>
+        .ts-wrapper.single .ts-control { height: 36px !important; line-height: 36px !important; padding: 0 30px 0 8px !important; border: 1px solid #ccc !important; border-radius: 3px !important; background: white !important; box-shadow: none !important; }
+        .ts-wrapper.single .ts-control > input { line-height: 36px !important; top: 0px !important; }
+        .ts-wrapper .ts-toggle { height: 36px !important; line-height: 36px !important; width: 30px !important; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Программа ЭКО</h1>
+    </div>
+
+    <div class="container">
+        <form action="/calculate?v={{ range(1, 100000) | random }}" method="post">
+            <div class="section-title">
+                <span>1. Конструктивные слои стены</span>
+                <button type="button" class="btn-add" onclick="addLayer()">+ Добавить слой</button>
+            </div>
+            
+            <!-- ДОБАВЛЕН КЛАСС layers-table -->
+            <table class="layers-table">
+                <thead>
+                    <tr>
+                        <th style="width: 40px;">№</th>
+                        <th style="width: 200px;">Вид материала</th>
+                        <th style="width: 120px;">Плотность, ρ, кг/м3</th>
+                        <th style="width: 100px;">Толщина, δ, м</th>
+                        <th style="width: 100px;">Масса M, кг</th>
+                        <th style="width: 150px;">СА1-А3, кгСО2экв/м2</th>
+                        <th style="width: 140px;">ЕА1–А3, МДж/м2</th>
+                        <th style="width: 110px;">Ro слоя, м2·°С/Вт</th>
+                        <th style="width: 60px;"></th>
+                    </tr>
+                </thead>
+                <tbody id="layers-body"></tbody>
+
+                <tr class="reinf-row">
+                    <td><b>Арм.</b></td>
+                    <td>
+                        <select id="reinf_search">
+                            <option value="">Нет арматуры</option>
+                            {% if reinf_name %}
+                            <option value="{{ reinf_name }}" selected>{{ reinf_name }}</option>
+                            {% endif %}
+                        </select>
+                        <input type="hidden" name="reinf_id" id="reinf_id" value="{{ reinf_id if reinf_id else '0' }}">
+                    </td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>
+                        <div class="mass-input-wrapper">
+                            <input type="number" step="0.1" name="reinf_mass" id="reinf_mass" value="{{ reinf_mass if reinf_mass else '0' }}" onchange="this.blur()">
+                            <span class="mass-hint">кг/м2</span>
+                        </div>
+                    </td>
+                    <td class="result-cell" id="res_carb_reinf">{% if calc and calc['reinf'] is defined %}{{ calc['reinf'].carbon }}{% endif %}</td>
+                    <td class="result-cell" id="res_en_reinf">{% if calc and calc['reinf'] is defined %}{{ calc['reinf'].energy }}{% endif %}</td>
+                    <td>-</td>
+                    <td></td>
+                </tr>
+
+                <tr class="total-row">
+                    <td colspan="4" style="text-align: right;">Итого на 1 м2:</td>
+                    <td>{{ total_mass if total_mass else '-' }}</td>
+                    <td>{{ total_carbon if total_carbon else '-' }}</td>
+                    <td>{{ total_energy if total_energy else '-' }}</td>
+                    <td>{{ R0 if R0 else '-' }}</td>
+                    <td></td>
+                </tr>
+            </table>
+
+            <h3 class="section-title">2. Дополнительные данные</h3>
+            <table class="secondary-table">
+                <tr><th>2.1 ГСОП, °С·сут</th><th>2.2 Общая площадь S, м2</th></tr>
+                <tr>
+                    <td><input type="number" step="0.1" name="gsop" value="{{ gsop if gsop else 4378 }}" required onchange="this.blur()"></td>
+                    <td><input type="number" step="0.1" name="total_area" value="{{ total_area if total_area else 620 }}" required onchange="this.blur()"></td>
+                </tr>
+            </table>
+
+            <div class="action-buttons">
+                <button type="button" class="btn btn-clear" onclick="window.location.href='/'">Очистить всё</button>
+                <button type="submit" class="btn btn-primary">Рассчитать параметры</button>
+                {% if project_id %}
+                <a href="/download_pdf/{{ project_id }}" class="btn btn-secondary">Скачать PDF</a>
+                {% endif %}
+            </div>
+        </form>
+
+        {% if R0 %}
+        <div class="results-section">
+            <h3 class="section-title">3. Расчет теплотехнических характеристик и расхода газа</h3>
+            <table class="results-table">
+                <tr>
+                    <td class="result-desc">Годовые трансмиссионные потери тепловой энергии через 1 м2 наружных стен с рассчитанным R0 усл за отопительный период (Qст.год), кВт·ч/год</td>
+                    <td class="result-val">{{ Q1 }}</td>
+                </tr>
+                <tr>
+                    <td class="result-desc">Расчет трансмиссионных потерь тепловой энергии через всю площадь стен S за отопительный период (Qгод), кВт·ч в год</td>
+                    <td class="result-val">{{ Qt }}</td>
+                </tr>
+                <tr>
+                    <td class="result-desc">Расход природного газа (метана) на компенсацию трансмиссионных потерь тепловой энергии через 1 м2 стен в год (V1), м3</td>
+                    <td class="result-val">{{ V1 }}</td>
+                </tr>
+                <tr>
+                    <td class="result-desc">Расход природного газа (метана) на компенсацию трансмиссионных потерь тепловой энергии через всю площадь стен S в год (VОбщ), м3</td>
+                    <td class="result-val">{{ Vt }}</td>
+                </tr>
+            </table>
+        </div>
+        {% endif %}
+    </div>
+
+<script>
+    const tbody = document.getElementById('layers-body');
+    let layerIndex = 0;
+    const savedLayers = {{ form_layers | safe }}; 
+
+    function addLayer(data = null) {
+        const tr = document.createElement('tr');
+        const currentIdx = layerIndex++;
+        const res = calcResults[String(currentIdx)] || null;
+
+        let matOptionsHtml = '<option value="">Выбрать...</option>';
+        let densHtml = '<option value="">Уточните плотность</option>';
+        let isDensDisabled = true;
+        let thickVal = '';
+        let matIdVal = '0';
+        let initialMatName = null; 
+
+        if (data) {
+            initialMatName = data.mat_name || null;
+            thickVal = data.thick;
+            matIdVal = data.mat_id;
+            isDensDisabled = data.dens_disabled;
+            data.dens_options.forEach(opt => {
+                densHtml += `<option value="${opt.id}" ${opt.id == data.mat_id ? 'selected' : ''}>${opt.density} кг/м3</option>`;
+            });
+        }
+
+        // ДОБАВЛЕНЫ АТРИБУТЫ data-label
+        tr.innerHTML = `
+            <td class="row-num" data-label="№">${currentIdx + 1}</td>
+            <td data-label="Вид материала"><select class="mat-search" name="mat_names">${matOptionsHtml}</select>
+                <input type="hidden" name="mat_ids" value="${matIdVal}"></td>
+            <td data-label="Плотность"><select class="dens-select" name="dens_ids" ${isDensDisabled ? 'disabled' : ''}>${densHtml}</select></td>
+            <td data-label="Толщина, δ, м"><input type="number" step="0.001" name="thicks" value="${thickVal}" onchange="this.blur()" placeholder="0.25"></td>
+            <td data-label="Масса" class="result-cell">${res ? res.mass : ''}</td>
+            <td data-label="СА1-А3" class="result-cell">${res ? res.carbon : ''}</td>
+            <td data-label="ЕА1-А3" class="result-cell">${res ? res.energy : ''}</td>
+            <td data-label="Ro слоя" class="result-cell">${res ? res.r_layer : ''}</td>
+            <td data-label=""><button type="button" class="btn-remove" onclick="removeLayer(this)">Удалить</button></td>
+        `;
+        
+        tbody.appendChild(tr);
+        initTomSelect(tr, initialMatName); 
+    }
+
+    function removeLayer(btn) {
+        if (tbody.querySelectorAll('tr').length <= 1) {
+            alert("Должен остаться хотя бы один слой!");
+            return;
+        }
+        btn.closest('tr').remove();
+        updateRowNumbers();
+    }
+
+    function updateRowNumbers() {
+        const rows = tbody.querySelectorAll('tr');
+        rows.forEach((row, index) => {
+            row.querySelector('.row-num').textContent = index + 1;
+        });
+    }
+
+    function initTomSelect(row, initialValue = null) {
+        const matSelect = row.querySelector('.mat-search');
+        const densSelect = row.querySelector('.dens-select');
+        const hiddenId = row.querySelector('input[name="mat_ids"]');
+
+        const tsInstance = new TomSelect(matSelect, {
+            options: wallDB, 
+            valueField: 'material_name', 
+            labelField: 'material_name', 
+            searchField: ['material_name'],
+            maxOptions: null, 
+            create: false, 
+            closeAfterSelect: true,
+            onChange: function(value) {
+                this.blur(); 
+                densSelect.innerHTML = '<option value="">Уточните плотность</option>';
+                densSelect.disabled = true; hiddenId.value = 0;
+                if (!value) return;
+                
+                const sameNames = wallDB.filter(m => m.material_name === value);
+                if (sameNames.length === 1) {
+                    densSelect.innerHTML = `<option value="${sameNames[0].id}">${sameNames[0].density} кг/м3</option>`;
+                    densSelect.disabled = true; hiddenId.value = sameNames[0].id;
+                } else {
+                    densSelect.disabled = false;
+                    sameNames.forEach(m => { 
+                        const opt = document.createElement('option'); 
+                        opt.value = m.id; 
+                        opt.textContent = m.density + ' кг/м3'; 
+                        densSelect.appendChild(opt); 
+                    });
+                }
+            }
+        });
+        
+        if (initialValue) {
+            tsInstance.setValue(initialValue, true); 
+        }
+
+        densSelect.addEventListener('change', function(e) { 
+            hiddenId.value = e.target.value; 
+            this.blur();
+        });
+    }
+
+    window.onload = function() {
+        if (savedLayers.length > 0) {
+            savedLayers.forEach(layer => addLayer(layer));
+        } else {
+            for (let i = 0; i < 3; i++) {
+                addLayer();
+            }
+        }
+
+        const reinfInitialValue = "{{ reinf_name if reinf_name else '' }}";
+        const reinfTs = new TomSelect('#reinf_search', {
+            options: armDB, valueField: 'material_name', labelField: 'material_name', searchField: ['material_name'],
+            maxOptions: null, create: false, closeAfterSelect: true,
+            onChange: function(value) {
+                this.blur(); 
+                const armData = armDB.find(m => m.material_name === value);
+                document.getElementById('reinf_id').value = armData ? armData.id : 0;
+            }
+        });
+        if (reinfInitialValue) {
+            reinfTs.setValue(reinfInitialValue, true);
+        }
+    };
+</script>
+</body>
+</html>
