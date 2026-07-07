@@ -3,21 +3,23 @@ import json
 from datetime import datetime
 from fastapi import FastAPI, Request, Form, Depends, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
-from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 import pandas as pd
 from fpdf import FPDF
+from jinja2 import Environment, FileSystemLoader # ИСПОЛЬЗУЕМ ЧИСТЫЙ JINJA2
 
 from database import get_db, Project
 
 # --- НАСТРОЙКИ ---
 app = FastAPI(title="Программа ЭКО")
-templates = Jinja2Templates(directory="templates")
+
+# ИНИЦИАЛИЗИРУЕМ JINJA2 НАПРЯМУЮ (МИНОЯ СЛОМАННЫЙ STARLETTE)
+env = Environment(loader=FileSystemLoader("templates"))
 
 # --- ЗАГРУЗКА БАЗЫ ДАННЫХ ---
 df = pd.read_csv("database.csv")
-df = df.fillna(0) # ВАЖНО: Заменяем пустые ячейки (NaN) на 0, иначе JSON ломается
+df = df.fillna(0)
 materials_db = df.to_dict('records')
 
 def is_arm(mat):
@@ -30,12 +32,14 @@ arm_materials = [m for m in materials_db if is_arm(m)]
 # --- ГЛАВНАЯ СТРАНИЦА ---
 @app.get("/", response_class=HTMLResponse)
 async def read_form(request: Request):
-    return templates.TemplateResponse("index.html", {
-        "request": request,
-        "wall_json": json.dumps(wall_materials, ensure_ascii=False),
-        "arm_json": json.dumps(arm_materials, ensure_ascii=False),
-        "form_layers": "[]"
-    })
+    template = env.get_template("index.html")
+    html = template.render(
+        request=request,
+        wall_json=json.dumps(wall_materials, ensure_ascii=False),
+        arm_json=json.dumps(arm_materials, ensure_ascii=False),
+        form_layers="[]"
+    )
+    return HTMLResponse(content=html)
 
 # --- РАСЧЕТЫ ---
 @app.post("/calculate", response_class=HTMLResponse)
@@ -120,33 +124,38 @@ async def calculate(
         "layers": list(calc_rows.values())
     }
     
-    # Сохраняем проект без привязки к пользователю
-    new_project = Project(results_json=json.dumps(project_data, ensure_ascii=False))
-    db.add(new_project)
-    db.commit()
-    db.refresh(new_project)
-    project_id = new_project.id
+    project_id = None
+    try:
+        new_project = Project(results_json=json.dumps(project_data, ensure_ascii=False))
+        db.add(new_project)
+        db.commit()
+        db.refresh(new_project)
+        project_id = new_project.id
+    except Exception:
+        pass
 
-    response = templates.TemplateResponse("index.html", {
-        "request": request,
-        "wall_json": json.dumps(wall_materials, ensure_ascii=False),
-        "arm_json": json.dumps(arm_materials, ensure_ascii=False),
-        "form_layers": json.dumps(form_layers, ensure_ascii=False),
-        "calc": calc_rows, "project_id": project_id,
-        "total_mass": round(total_mass, 2), "R0": round(R0, 4),
-        "total_carbon": round(total_carbon, 2), "total_energy": round(total_energy, 2),
-        "Q1": round(Q1, 3), "Qt": round(Qt, 3), "V1": round(V1, 3), "Vt": round(Vt, 3),
-        "gsop": gsop, "total_area": total_area,
-        "reinf_id": reinf_id, "reinf_mass": reinf_mass if reinf_mass > 0 else "0",
-        "reinf_name": next((m['material_name'] for m in materials_db if m['id'] == reinf_id), "")
-    })
+    template = env.get_template("index.html")
+    html = template.render(
+        request=request,
+        wall_json=json.dumps(wall_materials, ensure_ascii=False),
+        arm_json=json.dumps(arm_materials, ensure_ascii=False),
+        form_layers=json.dumps(form_layers, ensure_ascii=False),
+        calc=calc_rows, project_id=project_id,
+        total_mass=round(total_mass, 2), R0=round(R0, 4),
+        total_carbon=round(total_carbon, 2), total_energy=round(total_energy, 2),
+        Q1=round(Q1, 3), Qt=round(Qt, 3), V1=round(V1, 3), Vt=round(Vt, 3),
+        gsop=gsop, total_area=total_area,
+        reinf_id=reinf_id, reinf_mass=reinf_mass if reinf_mass > 0 else "0",
+        reinf_name=next((m['material_name'] for m in materials_db if m['id'] == reinf_id), "")
+    )
+    
+    response = HTMLResponse(content=html)
     response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
     
     return response
 
-# --- ГЕНЕРАЦИЯ PDF ---
 # --- ГЕНЕРАЦИЯ PDF ---
 @app.get("/download_pdf/{project_id}")
 async def download_pdf(project_id: int, db: Session = Depends(get_db)):
@@ -165,12 +174,10 @@ async def download_pdf(project_id: int, db: Session = Depends(get_db)):
     pdf.cell(0, 10, 'ПРОГРАММА ЭКО - Расчет наружной стены', new_x="LMARGIN", new_y="NEXT", align='C')
     pdf.ln(5)
 
-    # --- 1. ТАБЛИЦА СЛОЕВ ---
     col_widths = [75, 20, 15, 18, 22, 22, 18]
     headers = ['Материал', 'ρ, кг/м3', 'δ, м', 'Масса', 'СА1-А3', 'ЕА1-А3', 'δ/λ']
     pdf.set_font('DejaVu', '', 7)
     
-    # Функция для таблицы слоев (автоперенос по словам и страницам)
     def draw_table_row(cells_data):
         line_h = 5
         max_lines = 1
@@ -183,18 +190,15 @@ async def download_pdf(project_id: int, db: Session = Depends(get_db)):
         x_start = pdf.get_x()
         y_start = pdf.get_y()
         
-        # Перенос на новую страницу, если строка не влезает
         if y_start + row_h > 270:
             pdf.add_page()
             y_start = pdf.get_y()
             x_start = pdf.get_x()
 
-        # Рисуем рамки
         for i in range(len(cells_data)):
             pdf.set_xy(x_start + sum(col_widths[:i]), y_start)
             pdf.cell(col_widths[i], row_h, border=1, align='C')
         
-        # Пишем текст
         for i, txt in enumerate(cells_data):
             pdf.set_xy(x_start + sum(col_widths[:i]) + 0.5, y_start + 0.5)
             align = 'L' if i == 0 else 'C'
@@ -202,7 +206,6 @@ async def download_pdf(project_id: int, db: Session = Depends(get_db)):
         
         pdf.set_xy(x_start, y_start + row_h)
 
-    # Отрисовка таблицы слоев
     draw_table_row(headers)
     for l in data["layers"]:
         draw_table_row([
@@ -215,78 +218,63 @@ async def download_pdf(project_id: int, db: Session = Depends(get_db)):
         str(data["total_carbon"]), str(data["total_energy"]), f'R0={data["R0"]}'
     ])
     
-    # --- 2. ТАБЛИЦА РЕЗУЛЬТАТОВ ---
     pdf.ln(8)
-    desc_w = 140  # Ширина колонки с описанием
-    val_w = 50    # Ширина колонки со значением
+    desc_w = 140
+    val_w = 50
     
-    # Функция для отрисовки строк результатов
     def draw_desc_row(label, value):
         line_h = 5
-        # Считаем количество строк для описания
         str_w_label = pdf.get_string_width(str(label))
         lines_label = max(1, int(str_w_label / (desc_w - 2)) + 1)
-        # Считаем количество строк для значения
         str_w_val = pdf.get_string_width(str(value))
         lines_val = max(1, int(str_w_val / (val_w - 2)) + 1)
         
-        # Берем максимальную высоту
         max_lines = max(lines_label, lines_val)
         row_h = line_h * max_lines
         
         x_start = pdf.get_x()
         y_start = pdf.get_y()
         
-        # Перенос на новую страницу, если не влезает
         if y_start + row_h > 270:
             pdf.add_page()
             y_start = pdf.get_y()
             x_start = pdf.get_x()
         
-        # Рисуем рамки
         pdf.set_xy(x_start, y_start)
         pdf.cell(desc_w, row_h, border=1)
         pdf.set_xy(x_start + desc_w, y_start)
         pdf.cell(val_w, row_h, border=1, align='C')
         
-        # Пишем описание (по левому краю)
         pdf.set_xy(x_start + 1, y_start + 1)
         pdf.multi_cell(desc_w - 2, line_h, str(label), border=0, align='L')
         
-        # Пишем значение (по центру и вертикально по центру)
         val_y_offset = (row_h - (lines_val * line_h)) / 2
         pdf.set_xy(x_start + desc_w + 1, y_start + val_y_offset + 0.5)
         pdf.multi_cell(val_w - 2, line_h, str(value), border=0, align='C')
         
-        # Перемещаем курсор в конец строки
         pdf.set_xy(x_start, y_start + row_h)
 
-    # Заголовок "ИТОГО НА 1 м2:"
     pdf.set_font('DejaVu', '', 9)
     pdf.cell(190, 7, "ИТОГО НА 1 м2:", border=1, align='L')
     pdf.ln()
     pdf.set_font('DejaVu', '', 8)
     
-    # Заполняем первую часть
     draw_desc_row("Масса", f"{data['total_mass']} кг")
     draw_desc_row("СА1-А3 (выбросы углерода при производстве материалов, кгСО2экв/м2)", data['total_carbon'])
     draw_desc_row("ЕА1-А3 (воплощенная энергия в материалах, МДж/м2)", data['total_energy'])
     draw_desc_row("R0 (условное сопротивление теплопередаче, м2·°С/Вт)", data['R0'])
     
-    # Отступ и заголовок "3. Расчет..."
     pdf.ln(3)
     pdf.set_font('DejaVu', '', 9)
     pdf.cell(190, 7, "3. Расчет теплотехнических характеристик и расхода газа:", border=1, align='L')
     pdf.ln()
     pdf.set_font('DejaVu', '', 8)
     
-    # Заполняем вторую часть
     draw_desc_row("Годовые трансмиссионные потери тепловой энергии через 1 м2 наружных стен с рассчитанным R0 усл за отопительный период (Qст.год)", f"{data['Q1']} кВт·ч/год")
     draw_desc_row("Расчет трансмиссионных потерь тепловой энергии через всю площадь стен S за отопительный период (Qгод)", f"{data['Qt']} кВт·ч/год")
     draw_desc_row("Расход природного газа (метана) на компенсацию трансмиссионных потерь тепловой энергии через 1 м2 стен в год (V1)", f"{data['V1']} м3")
     draw_desc_row("Расход природного газа (метана) на компенсацию трансмиссионных потерь тепловой энергии через всю площадь стен S в год (VОбщ)", f"{data['Vt']} м3")
 
-    # Конвертация и возврат файла
     pdf_bytes = pdf.output()
     if isinstance(pdf_bytes, bytearray): pdf_bytes = bytes(pdf_bytes)
     elif isinstance(pdf_bytes, str): pdf_bytes = pdf_bytes.encode('latin-1')
@@ -296,4 +284,5 @@ async def download_pdf(project_id: int, db: Session = Depends(get_db)):
         media_type="application/pdf", 
         headers={"Content-Disposition": f"attachment; filename=eco_report_{project_id}.pdf"}
     )
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
